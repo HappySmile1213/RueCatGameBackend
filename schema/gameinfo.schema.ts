@@ -2,49 +2,22 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
 @Schema()
-export class Game {
+export class GameInfo {
   @Prop()
-  userList: string[];
+  round: number;
 
   @Prop()
-  txList: string[];
+  minToken: string;
 
   @Prop()
-  amountList: string[];
+  duration: number;
 
   @Prop()
-  winnerList: string[];
-
-  @Prop()
-  prizeList: string[];
-
-  @Prop()
-  timeList: Date[];
-
-  @Prop()
-  winnerHash: string;
-
-  @Prop()
-  totalAmount: number;
-
-  @Prop({ type: Date })
-  startTime: Date;
-7
-  @Prop()
-  gameDuration: number;
-
-  @Prop()
-  minTokenAmount: number;
-
-  @Prop()
-  gameStatus: number;
-
-  @Prop()
-  prizeSend: boolean;
+  isManualFinish: boolean;
 
   @Prop()
   lastSlot: number;
 }
 
-export type GameDocument = Game & Document;
-export const GameSchema = SchemaFactory.createForClass(Game);
+export type GameInfoDocument = GameInfo & Document;
+export const GameInfoSchema = SchemaFactory.createForClass(GameInfo);

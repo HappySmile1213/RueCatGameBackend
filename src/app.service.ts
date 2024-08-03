@@ -2,11 +2,19 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 
 import { Model } from 'mongoose';
-import { GameDocument, Game, GameSchema } from 'schema/game.schema';
-import { GAME_INTERVAL, TOKEN_AMOUNT } from './constants';
+import { GameDocument } from 'schema/game.schema';
+import { GameInfoDocument } from 'schema/gameinfo.schema';
+import { GAME_INTERVAL, mintPublicKey, PROGRAM_ID, RPC_URL, TOKEN_AMOUNT, TOKEN_DECIMAL, TOKEN_MINT } from './constants';
 import { getNewUserOfGame } from './solana';
 import { exit } from 'process';
 import { GameHistoryDto } from 'dto/gamehistory.dto';
+import { BN } from "bn.js";
+import bs58 from "bs58";
+
+import { PublicKey, Connection, Transaction, Keypair, SYSVAR_RENT_PUBKEY, SystemProgram } from '@solana/web3.js';
+import { AnchorProvider, Program, Wallet } from "@project-serum/anchor";
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, MintLayout, createBurnInstruction, getAssociatedTokenAddress } from '@solana/spl-token';
+import { bettingIDL } from 'idl/bettingIDL';
 
 @Injectable()
 export class AppService {
@@ -14,11 +22,25 @@ export class AppService {
   private lastTime = 0;
   private busy = false;
 
-  constructor(@InjectModel('game') private gameModel: Model<GameDocument>) {
+  constructor(
+    @InjectModel('game') private gameModel: Model<GameDocument>, 
+    @InjectModel('gameInfo') private gameInfoModel: Model<GameInfoDocument>
+  ) {
     this.lastTime = new Date().getMilliseconds();
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    const existingGameInfo = await this.gameInfoModel.findOne();
+    if( !existingGameInfo) {
+      const initialGameInfo = new this.gameInfoModel({ 
+        round: 0,
+        minToken: 10000 * 10 ** TOKEN_DECIMAL,
+        duration: 7 * 24 * 60,
+        isManualFinish: false,
+        lastSlot: 0,
+       });
+       await initialGameInfo.save();
+    }
     this.updateGameInfo();
   }
 
@@ -27,25 +49,41 @@ export class AppService {
   }
 
   async transferToken() {
-    const finishCurrentGame = await this.gameModel.findOne({ gameStatus: 2 });
-    finishCurrentGame.prizeSend = true;
+    const finishedGame = await this.gameModel.findOne({ gameStatus: 2 });
+    finishedGame.prizeSend = true;
 
     await this.gameModel.updateOne(
-      { _id: finishCurrentGame._id },
-      finishCurrentGame,
+      { _id: finishedGame._id },
+      finishedGame,
     );
 
     return JSON.stringify({ message: 'Token transfer success' });
   }
 
+  async getMinTokenAndDuration() {
+    const gameInfo = await this.gameInfoModel.findOne();
+    if (!gameInfo) return null;
+    const min: string = gameInfo.minToken;
+    const dur: number = gameInfo.duration;
+    return { min, dur };
+  }
+
+  async setGameInfo(minToken: string, duration: string) {
+    const gameInfo = await this.gameInfoModel.findOne();
+    gameInfo.minToken = (parseInt(minToken) * 10 ** TOKEN_DECIMAL).toString();
+    gameInfo.duration = parseInt(duration);
+    await this.gameInfoModel.updateOne({ _id: gameInfo._id }, gameInfo);
+    return JSON.stringify({ message: 'Success to set minimum tokens and duration.' });
+  }
+
   async startNewGame(minToken: string, duration: string) {
     // First, change GameStatus as fully finished
-    const finishCurrentGame = await this.gameModel.findOne({ gameStatus: 2 });
-    if (finishCurrentGame) {
-      finishCurrentGame.gameStatus = 3;
+    const finishedGame = await this.gameModel.findOne({ gameStatus: 2 });
+    if (finishedGame) {
+      finishedGame.gameStatus = 3;
       await this.gameModel.updateOne(
-        { _id: finishCurrentGame._id },
-        finishCurrentGame,
+        { _id: finishedGame._id },
+        finishedGame,
       );
     }
 
@@ -54,8 +92,18 @@ export class AppService {
       return JSON.stringify({ message: 'Previous round is not finished yet.' });
     }
 
+    // update game information
+    const gameInfo = await this.gameInfoModel.findOne();
+    if( !gameInfo) return;
+    // gameInfo.duration = parseInt(duration) ;
+    // gameInfo.minToken = (parseInt(minToken) * 10 ** TOKEN_DECIMAL).toString();
+    gameInfo.lastSlot = finishedGame?.lastSlot ?? 0;
+    gameInfo.round += 1;
+    await this.gameInfoModel.updateOne({ _id: gameInfo._id }, gameInfo);
+
+    // start a new game
     const newGame = new this.gameModel({
-      no: 1,
+      no: gameInfo.round,
       userList: [],
       txList: [],
       timeList: [],
@@ -66,14 +114,14 @@ export class AppService {
       totalAmount: '0',
       startTime: new Date(),
       gameDuration: parseInt(duration),
-      minTokenAmount: parseInt(minToken) * 10 ** 6,
+      minTokenAmount: parseInt(minToken),
       gameStatus: 1,
-      lastSlot: 0,
+      lastSlot: gameInfo.lastSlot,
       prizeSend: false,
     });
     console.log('saving');
     await newGame.save();
-    return JSON.stringify({ message: 'New round is started' });
+    return JSON.stringify({ message: '== New round is started ==' });
   }
 
   async finishCurrentGame(address: string) {
@@ -84,8 +132,16 @@ export class AppService {
     if (currentGame) {
       this.selectWinner(currentGame);
       currentGame.gameStatus = 2;
-
       await this.gameModel.updateOne({ _id: currentGame._id }, currentGame);
+
+      // set automatically finish flag
+      const gameInfo = await this.gameInfoModel.findOne();
+      if( gameInfo) {
+        gameInfo.isManualFinish = true;
+        // gameInfo.lastSlot = currentGame.lastSlot;
+        // gameInfo.round += 1;
+        await this.gameInfoModel.updateOne({ _id: gameInfo._id }, gameInfo);
+      }
     }
     return JSON.stringify({ message: 'Round is finished' });
   }
@@ -96,18 +152,40 @@ export class AppService {
   }
 
   selectWinner(game: any) {
+
     const range = game.userList.length;
-    const first = Math.floor(Math.random() * range);
-    const second = Math.floor(Math.random() * range);
-    const third = Math.floor(Math.random() * range);
 
-    game.winnerList.push(game.userList[first]);
-    game.winnerList.push(game.userList[second]);
-    game.winnerList.push(game.userList[third]);
+    if( !range) return;
+    if( range === 1) {
+      game.winnerList.push(game.userList[0]);
+      game.prizeList.push((game.totalAmount / 2  ).toString());
+      return;
+    }
+    if( range === 2) {
+      game.winnerList.push(game.userList[0] > game.userList[1] ? game.userList[0] : game.userList[1])
+      game.winnerList.push(game.userList[0] > game.userList[1] ? game.userList[1] : game.userList[0])
 
-    game.prizeList.push(((game.totalAmount / 100) * 60).toString());
-    game.prizeList.push(((game.totalAmount / 100) * 30).toString());
-    game.prizeList.push(((game.totalAmount / 100) * 10).toString());
+      game.prizeList.push(((game.totalAmount / 2 / 100) * 65).toString());
+      game.prizeList.push(((game.totalAmount / 2 / 100) * 35).toString());
+      return;
+    }
+    if( range >= 3) {
+      const selectedIndices = new Set<number>();
+
+      while (selectedIndices.size < 3 && selectedIndices.size < range) {
+          const randomIndex = Math.floor(Math.random() * range);
+          selectedIndices.add(randomIndex);
+      }
+
+      // Add winners to the winnerList
+      selectedIndices.forEach(index => {
+          game.winnerList.push(game.userList[index]);
+      });
+    }
+
+    game.prizeList.push(((game.totalAmount / 2 / 100) * 60).toString());
+    game.prizeList.push(((game.totalAmount / 2 / 100) * 30).toString());
+    game.prizeList.push(((game.totalAmount / 2 / 100) * 10).toString());
   }
 
   async getCurrentGame(): Promise<string> {
@@ -140,8 +218,157 @@ export class AppService {
     };
   }
 
+  async sendPrizeToWinners(game: any) {
+    console.log("== Sending prize to winners... ==");
+   
+    const secretKey = bs58.decode(process.env.PRIVATE_KEY);
+
+    const walletKeypair = Keypair.fromSecretKey(secretKey);
+    
+    const connection = new Connection(RPC_URL, 'confirmed');
+
+    const provider = new AnchorProvider(
+        connection,
+        new Wallet(walletKeypair),
+        { preflightCommitment: "processed", }
+    );
+
+    const program = new Program(bettingIDL, PROGRAM_ID, provider);
+    const bettingPlatform = await this.getBettingVaultSeed(
+      mintPublicKey,
+      program.programId
+    );
+    const bettingState = await this.getBettingStateSeed(program.programId);
+
+    const tx = new Transaction();
+
+    // send half token for burning
+    const myTokenAccount = await getAssociatedTokenAddress(
+        mintPublicKey,
+        walletKeypair.publicKey
+      );
+    const transInst = await program.methods
+      .transfer(new BN(game.totalAmount / 2))
+      .accounts({
+        owner: walletKeypair.publicKey,
+        bettingState: bettingState,
+        vaultTokenAccount: bettingPlatform,
+        destinationTokenAccount: myTokenAccount,
+        destination: walletKeypair.publicKey,
+        mint: mintPublicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: SYSVAR_RENT_PUBKEY,
+      })
+      .instruction();
+    tx.add(transInst);
+
+    // add three instructions for tranfer
+    let index = 0;
+    for (const winner of game?.winnerList) {
+      const destination = new PublicKey(winner);
+      const destinationTokenAccount = await getAssociatedTokenAddress(
+        mintPublicKey,
+        destination
+      );
+
+      console.log(game?.prizeList[index]);
+      const transInst = await program.methods
+        .transfer(new BN(game?.prizeList[index++]))
+        .accounts({
+          owner: walletKeypair.publicKey,
+          bettingState: bettingState,
+          vaultTokenAccount: bettingPlatform,
+          destinationTokenAccount: destinationTokenAccount,
+          destination: destination,
+          mint: mintPublicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .instruction();
+      tx.add(transInst);
+    }
+
+    const signature = await connection.sendTransaction(tx, [
+      walletKeypair,
+    ]);
+
+    const confirmation = await connection.confirmTransaction(
+      signature,
+      "confirmed"
+    );
+
+    if (!confirmation.value.err) {
+      // burn token in admin wallet.
+      const userTokenAccount = await getAssociatedTokenAddress(
+        mintPublicKey,
+        walletKeypair.publicKey
+      );
+
+      const transaction = new Transaction().add(
+        createBurnInstruction(
+          userTokenAccount,
+          mintPublicKey,
+          walletKeypair.publicKey,
+          new BN(game?.totalAmount / 2).toNumber(),
+        )
+      );
+
+      const signature = await connection.sendTransaction(transaction, [
+        walletKeypair,
+      ]);
+      console.log("Token burnt.");
+    }
+  };
+
+  async getBettingVaultSeed(
+    tokenMint: PublicKey,
+    programId: PublicKey
+  ) {
+    const seedString = "vault";
+    const [PDA, bump] = PublicKey.findProgramAddressSync(
+      [Buffer.from(seedString), tokenMint.toBuffer()],
+      programId
+    );
+    return new PublicKey(PDA);
+  }
+
+  async getBettingStateSeed(programId: PublicKey) {
+    const seedString = "betting_state";
+    const [PDA, bump] = PublicKey.findProgramAddressSync(
+      [Buffer.from(seedString)],
+      programId
+    );
+    return new PublicKey(PDA);
+  }
+
   async updateGameInfo() {
     while (true) {
+      const finishGame = await this.gameModel.findOne({ gameStatus: 2 });
+      const gameInfo = await this.gameInfoModel.findOne();
+      
+      if( finishGame) {
+        // There's finished game, check manual finish
+        if( !gameInfo.isManualFinish) {
+
+          // 
+          if( !finishGame.prizeSend) {
+            await this.sendPrizeToWinners(finishGame);
+            finishGame.prizeSend  = true;
+            await this.gameModel.updateOne({ _id: finishGame._id }, finishGame);
+          }
+          else {
+            // start new game automatically.
+            console.log("== Starting new round ==");
+            await this.startNewGame( gameInfo.minToken , gameInfo.duration.toString());
+          }
+        }
+      }
+
+
       this.busy = true;
       const currentGame = await this.gameModel.findOne({ gameStatus: 1 });
       if (!currentGame) {
@@ -182,22 +409,29 @@ export class AppService {
         await this.gameModel.updateOne({ _id: currentGame._id }, currentGame);
       }
 
-      // let endTime = new Date(
-      //   stTime.getTime() + gameData.gameDuration * 24 * 60 * 60 * 1000,
-      // );
-
+      // Check game finish
       const currentTime = new Date();
       let stTime = new Date(currentGame.startTime);
 
       if (
         currentTime.getTime() - stTime.getTime() >
-        currentGame.gameDuration * 24 * 60 * 60 * 1000
+        // currentGame.gameDuration * 24 * 60 * 60 * 1000
+        currentGame.gameDuration * 60 * 1000
       ) {
         console.log('selecting winners');
 
         this.selectWinner(currentGame);
         currentGame.gameStatus = 2;
         await this.gameModel.updateOne({ _id: currentGame._id }, currentGame);
+
+        // set automatically finish flag
+        const gameInfo = await this.gameInfoModel.findOne();
+        if( gameInfo) {
+          gameInfo.isManualFinish = false;
+          // gameInfo.lastSlot = currentGame.lastSlot;
+          // gameInfo.round += 1;
+          await this.gameInfoModel.updateOne({ _id: gameInfo._id }, gameInfo);
+        }
       }
       this.busy = false;
       await delay(3000);

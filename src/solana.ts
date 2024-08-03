@@ -10,13 +10,9 @@ import {
   LAMPORTS_PER_SOL,
   Connection,
 } from '@solana/web3.js';
-import { GAME_PROGRAM_ID, RPC_URL } from './constants';
+import { GAME_PROGRAM_ID, PROGRAM_ID, RPC_URL } from './constants';
 
 const connection = new Connection(RPC_URL, 'confirmed');
-// const GAME_PROGRAM_KEY = new PublicKey(GAME_PROGRAM_ID);
-const GAME_PROGRAM_KEY = new PublicKey(
-  '9mxg6zi8WBuLrGQiw4DLNmGVAmvBRnjWD2KfVRfV6bt5',
-);
 
 export const getNewUserOfGame = async (
   lastCheckedSlotNumber: number,
@@ -37,7 +33,7 @@ export const getNewUserOfGame = async (
     }
 
     const signatures = await connection.getConfirmedSignaturesForAddress(
-      GAME_PROGRAM_KEY,
+      PROGRAM_ID,
       lastCheckedSlotNumber,
       currentSlotNumber,
     );
@@ -51,8 +47,6 @@ export const getNewUserOfGame = async (
       if (timestamp <= startTime) {
         continue;
       }
-
-      // console.log("timestamp : ", timestamp.toISOString());
 
       if (tx.meta.logMessages == undefined) {
         continue;
@@ -72,6 +66,7 @@ export const getNewUserOfGame = async (
 
         if (log.includes('Deposit amount:')) {
           const match = log.match(/Deposit amount: (\d+) tokens/);
+          console.log("++++", match[1]);
           amount = match ? parseInt(match[1], 10) : null;
         }
       }

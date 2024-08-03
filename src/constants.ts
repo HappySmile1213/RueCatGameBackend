@@ -1,3 +1,4 @@
+import { PublicKey } from "@solana/web3.js";
 
 export const TOKEN_AMOUNT = process.env.TOKEN_AMOUNT ? parseInt(process.env.TOKEN_AMOUNT) : 1000;
 export const TOKEN_MINT = process.env.TOKEN_MINT ? process.env.TOKEN_MINT : '';
@@ -8,3 +9,5 @@ export const RPC_URL = process.env.RPC_URL ? process.env.RPC_URL : 'https://api.
 export const GAME_PROGRAM_ID = process.env.PROGRAM_ID ?? '';
 export const SLOT_INTERVAL = 400;
 
+export const PROGRAM_ID = new PublicKey("BeEwUiAENA6QvTQCFwYGDVRvB62Xes6KS3q1hcUTL9xS");
+export const mintPublicKey = new PublicKey("2Fi9XcRCAmLDX8h7P1DdtkKGdzvvCQvTj8XtuQYCMzro");

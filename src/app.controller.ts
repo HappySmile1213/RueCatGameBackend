@@ -33,12 +33,22 @@ export class AppController {
     return await this.appService.getGameHistory(id);
   }
 
+  @Post('/setGameInfo')
+  async setGameInfo(
+    @Body() body: { address: string, minTokens: string, duration: string},
+  ): Promise<string> {
+    const { address, minTokens, duration} = body;
+    return await this.appService.setGameInfo(minTokens, duration);
+  }
+  
   @Post('/startNewGame')
   async startNewGame(
-    @Body() body: { address: string; minTokens: string; duration: string },
+    @Body() body: { address: string},
   ): Promise<string> {
-    const { address, minTokens, duration } = body;
-    return await this.appService.startNewGame(minTokens, duration);
+    const { address} = body;
+    const { min, dur } = await this.appService.getMinTokenAndDuration();
+    // this.appService.
+    return await this.appService.startNewGame(min, dur.toString());
     // return await this.appService.getCurrentGame();
   }
 
